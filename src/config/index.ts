@@ -1,7 +1,7 @@
-import dotenv from 'dotenv';
-import path from 'path';
+import dotenv from "dotenv";
+import path from "path";
 
-dotenv.config({ path: path.resolve(__dirname, '../../.env') });
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
 
 export interface AppConfig {
   telegram: {
@@ -35,35 +35,35 @@ function getEnvRequired(key: string): string {
   const value = process.env[key];
   if (!value) {
     console.warn(`⚠️  Environment variable ${key} is not set. Using placeholder.`);
-    return '';
+    return "";
   }
   return value;
 }
 
 const config: AppConfig = {
   telegram: {
-    botToken: getEnvRequired('TELEGRAM_BOT_TOKEN'),
-    chatId: getEnvRequired('TELEGRAM_CHAT_ID'),
+    botToken: getEnvRequired("TELEGRAM_BOT_TOKEN"),
+    chatId: getEnvRequired("TELEGRAM_CHAT_ID"),
   },
   capital: {
-    amount: parseFloat(getEnvOrDefault('CAPITAL_AMOUNT', '3000000')),
-    riskPerTrade: parseFloat(getEnvOrDefault('RISK_PER_TRADE', '0.02')),
-    stopLossPct: parseFloat(getEnvOrDefault('STOP_LOSS_PCT', '0.03')),
+    amount: parseFloat(getEnvOrDefault("CAPITAL_AMOUNT", "3000000")),
+    riskPerTrade: parseFloat(getEnvOrDefault("RISK_PER_TRADE", "0.02")),
+    stopLossPct: parseFloat(getEnvOrDefault("STOP_LOSS_PCT", "0.03")),
   },
   signal: {
-    maxPerDay: parseInt(getEnvOrDefault('MAX_SIGNALS_PER_DAY', '5'), 10),
+    maxPerDay: parseInt(getEnvOrDefault("MAX_SIGNALS_PER_DAY", "5"), 10),
   },
   batch: {
-    size: parseInt(getEnvOrDefault('BATCH_SIZE', '50'), 10),
-    concurrencyLimit: parseInt(getEnvOrDefault('CONCURRENCY_LIMIT', '5'), 10),
+    size: parseInt(getEnvOrDefault("BATCH_SIZE", "20"), 10),
+    concurrencyLimit: parseInt(getEnvOrDefault("CONCURRENCY_LIMIT", "1"), 10),
   },
   cron: {
     // 08:45 WIB = 01:45 UTC (WIB is UTC+7)
-    dailyScan: '45 1 * * 1-5',
+    dailyScan: "45 1 * * 1-5",
     // Every hour on weekdays
-    hourlyScan: '0 * * * 1-5',
+    hourlyScan: "0 * * * 1-5",
     // 00:00 WIB = 17:00 UTC previous day
-    dailyReset: '0 17 * * *',
+    dailyReset: "0 17 * * *",
   },
 };
 
