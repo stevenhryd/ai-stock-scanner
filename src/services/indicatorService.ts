@@ -5,11 +5,11 @@
  * timeframe-specific analysis for 1D (trend filter) and 4H (entry trigger).
  */
 
-import { SMA, EMA, RSI } from 'technicalindicators';
-import { CandleData } from './dataService.js';
-import logger from '../utils/logger.js';
+import { SMA, EMA, RSI, MACD, ADX as ADXIndicator, ATR } from "technicalindicators";
+import { CandleData } from "./dataService.js";
+import logger from "../utils/logger.js";
 
-const MODULE = 'IndicatorService';
+const MODULE = "IndicatorService";
 
 // ─── Indicator Calculation ─────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ export interface DailyAnalysis {
  */
 export function analyzeDaily(candles: CandleData[]): DailyAnalysis | null {
   if (candles.length < 50) {
-    logger.warn(MODULE, 'Not enough daily candles for analysis (need 50+)');
+    logger.warn(MODULE, "Not enough daily candles for analysis (need 50+)");
     return null;
   }
 
@@ -65,7 +65,7 @@ export function analyzeDaily(candles: CandleData[]): DailyAnalysis | null {
   const rsiValues = calculateRSI(closes, 14);
 
   if (sma20Values.length === 0 || sma50Values.length === 0 || rsiValues.length === 0) {
-    logger.warn(MODULE, 'Insufficient data to calculate indicators');
+    logger.warn(MODULE, "Insufficient data to calculate indicators");
     return null;
   }
 
@@ -74,8 +74,7 @@ export function analyzeDaily(candles: CandleData[]): DailyAnalysis | null {
   const latestSMA50 = sma50Values[sma50Values.length - 1];
   const latestRSI = rsiValues[rsiValues.length - 1];
 
-  const isBullish =
-    latestClose > latestSMA20 && latestSMA20 > latestSMA50 && latestRSI > 50;
+  const isBullish = latestClose > latestSMA20 && latestSMA20 > latestSMA50 && latestRSI > 50;
 
   return {
     isBullish,
@@ -104,6 +103,14 @@ export interface FourHourAnalysis {
   volumeMultiple: number;
   /** Standard deviation of closes for volatility calculation */
   volatility: number;
+  /** Whether breakout candle is bullish (close > open) */
+  isBullishCandle: boolean;
+  /** Whether MACD line is above signal line */
+  macdBullish: boolean;
+  /** ADX value — trend strength (>=25 is strong trend) */
+  adx: number;
+  /** Average True Range (14-period) for dynamic SL sizing */
+  atr: number;
 }
 
 /**
@@ -116,12 +123,13 @@ export interface FourHourAnalysis {
  */
 export function analyze4H(candles: CandleData[]): FourHourAnalysis | null {
   if (candles.length < 25) {
-    logger.warn(MODULE, 'Not enough 4H candles for analysis (need 25+)');
+    logger.warn(MODULE, "Not enough 4H candles for analysis (need 25+)");
     return null;
   }
 
   const closes = candles.map((c) => c.close);
   const highs = candles.map((c) => c.high);
+  const lows = candles.map((c) => c.low);
   const volumes = candles.map((c) => c.volume);
 
   const latestCandle = candles[candles.length - 1];
@@ -130,13 +138,11 @@ export function analyze4H(candles: CandleData[]): FourHourAnalysis | null {
   const last5Highs = highs.slice(-6, -1);
   const high5 = Math.max(...last5Highs);
   const breakoutDetected = latestCandle.close > high5;
-  const breakoutStrength =
-    high5 > 0 ? ((latestCandle.close - high5) / high5) * 100 : 0;
+  const breakoutStrength = high5 > 0 ? ((latestCandle.close - high5) / high5) * 100 : 0;
 
   // 2. Volume spike: current volume > 1.5x average of last 20 candles
   const last20Volumes = volumes.slice(-21, -1);
-  const avgVolume20 =
-    last20Volumes.reduce((sum, v) => sum + v, 0) / last20Volumes.length;
+  const avgVolume20 = last20Volumes.reduce((sum, v) => sum + v, 0) / last20Volumes.length;
   const volumeSpike = latestCandle.volume > avgVolume20 * 1.5;
   const volumeMultiple = avgVolume20 > 0 ? latestCandle.volume / avgVolume20 : 0;
 
@@ -152,9 +158,59 @@ export function analyze4H(candles: CandleData[]): FourHourAnalysis | null {
   // 5. Volatility (standard deviation of closes over last 20 candles)
   const last20Closes = closes.slice(-20);
   const mean = last20Closes.reduce((s, c) => s + c, 0) / last20Closes.length;
-  const variance =
-    last20Closes.reduce((s, c) => s + Math.pow(c - mean, 2), 0) / last20Closes.length;
+  const variance = last20Closes.reduce((s, c) => s + Math.pow(c - mean, 2), 0) / last20Closes.length;
   const volatility = Math.sqrt(variance);
+
+  // 6. Bullish candle confirmation (close > open on breakout candle)
+  const isBullishCandle = latestCandle.close > latestCandle.open;
+
+  // 7. MACD (12, 26, 9) — bullish when MACD line > Signal line
+  let macdBullish = false;
+  try {
+    const macdResult = MACD.calculate({
+      values: closes,
+      fastPeriod: 12,
+      slowPeriod: 26,
+      signalPeriod: 9,
+      SimpleMAOscillator: false,
+      SimpleMASignal: false,
+    });
+    const latestMACD = macdResult[macdResult.length - 1];
+    if (latestMACD && latestMACD.MACD !== undefined && latestMACD.signal !== undefined) {
+      macdBullish = latestMACD.MACD > latestMACD.signal;
+    }
+  } catch {
+    // Not enough data for MACD — treat as non-bullish
+  }
+
+  // 8. ADX (14) — trend strength. >= 25 = strong trend
+  let adx = 0;
+  try {
+    const adxResult = ADXIndicator.calculate({
+      close: closes,
+      high: highs,
+      low: lows,
+      period: 14,
+    });
+    const latestADX = adxResult[adxResult.length - 1];
+    if (latestADX) adx = latestADX.adx;
+  } catch {
+    // Not enough data
+  }
+
+  // 9. ATR (14) — average true range for dynamic stop loss
+  let atr = 0;
+  try {
+    const atrResult = ATR.calculate({
+      close: closes,
+      high: highs,
+      low: lows,
+      period: 14,
+    });
+    atr = atrResult[atrResult.length - 1] || 0;
+  } catch {
+    // Not enough data
+  }
 
   return {
     breakoutDetected,
@@ -169,6 +225,10 @@ export function analyze4H(candles: CandleData[]): FourHourAnalysis | null {
     breakoutStrength: Math.max(0, breakoutStrength),
     volumeMultiple,
     volatility,
+    isBullishCandle,
+    macdBullish,
+    adx,
+    atr,
   };
 }
 
@@ -188,12 +248,12 @@ export interface SellSignal {
  */
 export function checkSellCondition(analysis: FourHourAnalysis): SellSignal {
   if (analysis.close < analysis.sma20) {
-    return { shouldSell: true, reason: 'Close below SMA20 (4H)' };
+    return { shouldSell: true, reason: "Close below SMA20 (4H)" };
   }
   if (analysis.rsi < 45) {
-    return { shouldSell: true, reason: 'RSI below 45' };
+    return { shouldSell: true, reason: "RSI below 45" };
   }
-  return { shouldSell: false, reason: '' };
+  return { shouldSell: false, reason: "" };
 }
 
 export default {

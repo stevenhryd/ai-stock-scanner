@@ -5,13 +5,13 @@
  * Uses dailyStateService to enforce limits.
  */
 
-import TelegramBot from 'node-telegram-bot-api';
-import config from '../config/index.js';
-import { BuySignal } from '../services/signalService.js';
-import { getTodayState, incrementBuyCounter } from '../scheduler/dailyStateService.js';
-import logger from '../utils/logger.js';
+import TelegramBot from "node-telegram-bot-api";
+import config from "../config/index.js";
+import { BuySignal } from "../services/signalService.js";
+import { getTodayState, incrementBuyCounter } from "../scheduler/dailyStateService.js";
+import logger from "../utils/logger.js";
 
-const MODULE = 'TelegramService';
+const MODULE = "TelegramService";
 
 let bot: TelegramBot | null = null;
 
@@ -20,12 +20,12 @@ let bot: TelegramBot | null = null;
  */
 export function initBot(): void {
   if (!config.telegram.botToken) {
-    logger.warn(MODULE, 'Telegram bot token not configured. Messages will be logged only.');
+    logger.warn(MODULE, "Telegram bot token not configured. Messages will be logged only.");
     return;
   }
 
   bot = new TelegramBot(config.telegram.botToken, { polling: false });
-  logger.info(MODULE, '✅ Telegram bot initialized.');
+  logger.info(MODULE, "✅ Telegram bot initialized.");
 }
 
 /**
@@ -40,9 +40,9 @@ export function getRemainingSignals(): number {
  * Format a number as Indonesian Rupiah.
  */
 function formatRupiah(amount: number): string {
-  return new Intl.NumberFormat('id-ID', {
-    style: 'currency',
-    currency: 'IDR',
+  return new Intl.NumberFormat("id-ID", {
+    style: "currency",
+    currency: "IDR",
     minimumFractionDigits: 0,
     maximumFractionDigits: 0,
   }).format(amount);
@@ -52,24 +52,36 @@ function formatRupiah(amount: number): string {
  * Format a buy signal into a Telegram message.
  */
 export function formatBuyMessage(signal: BuySignal): string {
-  const timestamp = signal.timestamp.toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
+  const timestamp = signal.timestamp.toLocaleString("id-ID", {
+    timeZone: "Asia/Jakarta",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
   });
+
+  const rsiVal = signal.fourHourAnalysis.rsi.toFixed(1);
+  const adxVal = signal.fourHourAnalysis.adx.toFixed(1);
+  const boVal = signal.fourHourAnalysis.breakoutStrength.toFixed(2);
+  const slPct = (((signal.entry - signal.stopLoss) / signal.entry) * 100).toFixed(2);
+  const tpPct = (((signal.takeProfit - signal.entry) / signal.entry) * 100).toFixed(2);
 
   return `📈 *SWING BUY SIGNAL*
 
-🏷 *Stock:* \`${signal.ticker.replace('.JK', '')}\` (${signal.ticker})
+🏷 *Stock:* \`${signal.ticker.replace(".JK", "")}\` (${signal.ticker})
 ⭐ *Score:* ${signal.score}/100
 💰 *Entry:* ${formatRupiah(signal.entry)}
-🛑 *Stop Loss:* ${formatRupiah(signal.stopLoss)}
-🎯 *Take Profit:* ${formatRupiah(signal.takeProfit)}
+🛑 *Stop Loss:* ${formatRupiah(signal.stopLoss)} (-${slPct}%)
+🎯 *Take Profit:* ${formatRupiah(signal.takeProfit)} (+${tpPct}%)
 📊 *Timeframe:* 4H
 📈 *Trend 1D:* ✅ Bullish
+
+🔬 *Konfirmasi Teknikal:*
+├ Breakout: +${boVal}% ✅
+├ RSI 4H: ${rsiVal} ✅
+├ MACD: Bullish ✅
+└ ADX: ${adxVal} (Trend Strength) ✅
 
 📦 *Position Sizing:*
 ├ Modal: ${formatRupiah(config.capital.amount)}
@@ -78,11 +90,12 @@ export function formatBuyMessage(signal: BuySignal): string {
 └ Position: ${formatRupiah(signal.positionSize)}
 
 📋 *Score Breakdown:*
-├ Breakout: ${signal.breakdown.breakoutScore}/100 (30%)
-├ Volume: ${signal.breakdown.volumeScore}/100 (20%)
-├ RSI: ${signal.breakdown.rsiScore}/100 (15%)
+├ Breakout: ${signal.breakdown.breakoutScore}/100 (35%)
 ├ Trend: ${signal.breakdown.trendScore}/100 (20%)
-└ Volatility: ${signal.breakdown.volatilityScore}/100 (15%)
+├ Volume: ${signal.breakdown.volumeScore}/100 (15%)
+├ ADX: ${signal.breakdown.adxScore}/100 (10%)
+├ RSI: ${signal.breakdown.rsiScore}/100 (10%)
+└ Volatility: ${signal.breakdown.volatilityScore}/100 (10%)
 
 ⏰ *Time:* ${timestamp} WIB
 
@@ -93,13 +106,13 @@ export function formatBuyMessage(signal: BuySignal): string {
  * Format an exit (sell) signal message.
  */
 export function formatExitMessage(ticker: string, reason: string, currentPrice: number): string {
-  const timestamp = new Date().toLocaleString('id-ID', {
-    timeZone: 'Asia/Jakarta',
+  const timestamp = new Date().toLocaleString("id-ID", {
+    timeZone: "Asia/Jakarta",
   });
 
   return `🔴 *EXIT WARNING*
 
-🏷 *Stock:* \`${ticker.replace('.JK', '')}\` (${ticker})
+🏷 *Stock:* \`${ticker.replace(".JK", "")}\` (${ticker})
 💰 *Current Price:* ${formatRupiah(currentPrice)}
 ⚠️ *Reason:* ${reason}
 
@@ -112,19 +125,19 @@ Disarankan untuk melepas posisi atau memindahkan Stop Loss (Trailing Stop) untuk
  * Format a daily summary header message.
  */
 export function formatSummaryHeader(signalCount: number): string {
-  const date = new Date().toLocaleDateString('id-ID', {
-    timeZone: 'Asia/Jakarta',
-    weekday: 'long',
-    year: 'numeric',
-    month: 'long',
-    day: 'numeric',
+  const date = new Date().toLocaleDateString("id-ID", {
+    timeZone: "Asia/Jakarta",
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
   });
 
   return `🔔 *AI STOCK SIGNAL SCANNER*
 📅 ${date}
 📊 Total sinyal baru: ${signalCount}
 
-${'─'.repeat(30)}`;
+${"─".repeat(30)}`;
 }
 
 /**
@@ -140,7 +153,7 @@ export async function sendSignal(signal: BuySignal): Promise<boolean> {
   const message = formatBuyMessage(signal);
 
   if (!bot || !config.telegram.chatId) {
-    logger.info(MODULE, '📩 [DRY RUN] Would send signal:');
+    logger.info(MODULE, "📩 [DRY RUN] Would send signal:");
     console.log(message);
     incrementBuyCounter();
     return true;
@@ -148,7 +161,7 @@ export async function sendSignal(signal: BuySignal): Promise<boolean> {
 
   try {
     await bot.sendMessage(config.telegram.chatId, message, {
-      parse_mode: 'Markdown',
+      parse_mode: "Markdown",
       disable_web_page_preview: true,
     });
     incrementBuyCounter();
@@ -168,13 +181,13 @@ export async function sendExitSignal(ticker: string, reason: string, currentPric
   const message = formatExitMessage(ticker, reason, currentPrice);
 
   if (!bot || !config.telegram.chatId) {
-    logger.info(MODULE, '📩 [DRY RUN] Would send EXIT signal:');
+    logger.info(MODULE, "📩 [DRY RUN] Would send EXIT signal:");
     console.log(message);
     return true;
   }
 
   try {
-    await bot.sendMessage(config.telegram.chatId, message, { parse_mode: 'Markdown' });
+    await bot.sendMessage(config.telegram.chatId, message, { parse_mode: "Markdown" });
     logger.info(MODULE, `📩 EXIT Signal sent for ${ticker}`);
     return true;
   } catch (error: any) {
@@ -188,8 +201,8 @@ export async function sendExitSignal(ticker: string, reason: string, currentPric
  */
 export async function sendDailySummary(signals: BuySignal[]): Promise<void> {
   if (signals.length === 0) {
-    logger.info(MODULE, 'No new signals to send.');
-    
+    logger.info(MODULE, "No new signals to send.");
+
     // Only send empty report once per day for the morning scan usually,
     // if we wanted to we could add it here but it's often noisy.
     return;
@@ -200,7 +213,7 @@ export async function sendDailySummary(signals: BuySignal[]): Promise<void> {
   const sendableSignals = signals.slice(0, remaining);
 
   if (sendableSignals.length === 0) {
-    logger.warn(MODULE, 'Daily limit already hit. Ignoring batch.');
+    logger.warn(MODULE, "Daily limit already hit. Ignoring batch.");
     return;
   }
 
@@ -208,7 +221,7 @@ export async function sendDailySummary(signals: BuySignal[]): Promise<void> {
   const header = formatSummaryHeader(sendableSignals.length);
   if (bot && config.telegram.chatId) {
     try {
-      await bot.sendMessage(config.telegram.chatId, header, { parse_mode: 'Markdown' });
+      await bot.sendMessage(config.telegram.chatId, header, { parse_mode: "Markdown" });
     } catch (error: any) {
       logger.error(MODULE, `Failed to send header: ${error.message}`);
     }
@@ -236,7 +249,7 @@ export async function sendMessage(text: string): Promise<void> {
 
   try {
     await bot.sendMessage(config.telegram.chatId, text, {
-      parse_mode: 'Markdown',
+      parse_mode: "Markdown",
       disable_web_page_preview: true,
     });
   } catch (error: any) {

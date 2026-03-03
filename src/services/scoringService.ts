@@ -2,25 +2,26 @@
  * Scoring Service
  *
  * Assigns a score from 0–100 to each stock signal based on weighted criteria:
- *   - Breakout strength: 30%
- *   - Volume spike:      20%
- *   - RSI strength:      15%
- *   - 1D trend alignment:20%
- *   - Volatility quality: 15%
+ *   - Breakout strength:  35%  (primary trigger — higher weight, false breakouts penalised)
+ *   - Volume spike:       15%
+ *   - RSI strength:       10%
+ *   - 1D trend alignment: 20%
+ *   - ADX trend strength: 10%  (NEW — weak trend = bad entry)
+ *   - Volatility quality: 10%
  */
 
-import { DailyAnalysis, FourHourAnalysis } from './indicatorService.js';
-import logger from '../utils/logger.js';
+import { DailyAnalysis, FourHourAnalysis } from "./indicatorService.js";
+import logger from "../utils/logger.js";
 
-const MODULE = 'ScoringService';
+const MODULE = "ScoringService";
 
 export interface ScoringMetrics {
-  breakoutStrength: number;    // percentage above 5-candle high
-  volumeMultiple: number;       // volume / avg volume
-  rsi: number;                  // RSI value (4H)
+  breakoutStrength: number; // percentage above 5-candle high
+  volumeMultiple: number; // volume / avg volume
+  rsi: number; // RSI value (4H)
   dailyAnalysis: DailyAnalysis; // 1D analysis result
-  volatility: number;           // stddev of closes
-  close: number;                // current close price
+  volatility: number; // stddev of closes
+  close: number; // current close price
 }
 
 export interface ScoredSignal {
@@ -31,6 +32,7 @@ export interface ScoredSignal {
     volumeScore: number;
     rsiScore: number;
     trendScore: number;
+    adxScore: number;
     volatilityScore: number;
   };
   dailyAnalysis: DailyAnalysis;
@@ -40,11 +42,13 @@ export interface ScoredSignal {
 /**
  * Score breakout strength (0–100). Higher breakout % = higher score.
  * Caps at 5% breakout for max score.
+ * Penalises very weak breakouts (< 1%) with a sharper ramp.
  */
 function scoreBreakout(breakoutStrength: number): number {
   if (breakoutStrength <= 0) return 0;
-  // Linear scale: 0% → 0, 5%+ → 100
-  return Math.min(100, (breakoutStrength / 5) * 100);
+  if (breakoutStrength < 1.0) return Math.round((breakoutStrength / 1.0) * 30); // 0–30 for < 1%
+  // Linear scale: 1% → 30, 5%+ → 100
+  return Math.min(100, 30 + ((breakoutStrength - 1.0) / 4.0) * 70);
 }
 
 /**
@@ -80,13 +84,11 @@ function scoreTrend(daily: DailyAnalysis): number {
   let score = 0;
 
   // Close above SMA20 — bonus for larger gap
-  const closeAboveSMA20 =
-    daily.sma20 > 0 ? ((daily.close - daily.sma20) / daily.sma20) * 100 : 0;
+  const closeAboveSMA20 = daily.sma20 > 0 ? ((daily.close - daily.sma20) / daily.sma20) * 100 : 0;
   score += Math.min(40, closeAboveSMA20 * 10);
 
   // SMA20 above SMA50 — bonus for wider gap
-  const sma20AboveSMA50 =
-    daily.sma50 > 0 ? ((daily.sma20 - daily.sma50) / daily.sma50) * 100 : 0;
+  const sma20AboveSMA50 = daily.sma50 > 0 ? ((daily.sma20 - daily.sma50) / daily.sma50) * 100 : 0;
   score += Math.min(30, sma20AboveSMA50 * 10);
 
   // RSI strength on daily
@@ -97,6 +99,18 @@ function scoreTrend(daily: DailyAnalysis): number {
   }
 
   return Math.min(100, score);
+}
+
+/**
+ * Score ADX trend strength (0–100).
+ * Strong trend (ADX >= 25) required for reliable breakouts.
+ */
+function scoreADX(adx: number): number {
+  if (adx >= 40) return 100;
+  if (adx >= 30) return 80;
+  if (adx >= 25) return 60;
+  if (adx >= 20) return 40;
+  return 0; // Choppy market — penalise heavily
 }
 
 /**
@@ -118,30 +132,18 @@ function scoreVolatility(volatility: number, close: number): number {
 /**
  * Calculate the composite score for a signal.
  */
-export function calculateScore(
-  ticker: string,
-  daily: DailyAnalysis,
-  fourHour: FourHourAnalysis
-): ScoredSignal {
+export function calculateScore(ticker: string, daily: DailyAnalysis, fourHour: FourHourAnalysis): ScoredSignal {
   const breakoutScore = scoreBreakout(fourHour.breakoutStrength);
   const volumeScore = scoreVolume(fourHour.volumeMultiple);
   const rsiScore = scoreRSI(fourHour.rsi);
   const trendScore = scoreTrend(daily);
+  const adxScore = scoreADX(fourHour.adx);
   const volatilityScore = scoreVolatility(fourHour.volatility, fourHour.close);
 
-  // Weighted composite
-  const score = Math.round(
-    breakoutScore * 0.3 +
-      volumeScore * 0.2 +
-      rsiScore * 0.15 +
-      trendScore * 0.2 +
-      volatilityScore * 0.15
-  );
+  // Weighted composite — Breakout 35% / Volume 15% / RSI 10% / Trend 20% / ADX 10% / Volatility 10%
+  const score = Math.round(breakoutScore * 0.35 + volumeScore * 0.15 + rsiScore * 0.1 + trendScore * 0.2 + adxScore * 0.1 + volatilityScore * 0.1);
 
-  logger.debug(
-    MODULE,
-    `${ticker} — Score: ${score} (BO:${breakoutScore.toFixed(0)} VOL:${volumeScore.toFixed(0)} RSI:${rsiScore.toFixed(0)} TREND:${trendScore.toFixed(0)} VLTY:${volatilityScore.toFixed(0)})`
-  );
+  logger.debug(MODULE, `${ticker} — Score: ${score} (BO:${breakoutScore.toFixed(0)} VOL:${volumeScore.toFixed(0)} RSI:${rsiScore.toFixed(0)} TREND:${trendScore.toFixed(0)} ADX:${adxScore.toFixed(0)} VLTY:${volatilityScore.toFixed(0)})`);
 
   return {
     ticker,
@@ -151,6 +153,7 @@ export function calculateScore(
       volumeScore: Math.round(volumeScore),
       rsiScore: Math.round(rsiScore),
       trendScore: Math.round(trendScore),
+      adxScore: Math.round(adxScore),
       volatilityScore: Math.round(volatilityScore),
     },
     dailyAnalysis: daily,
@@ -162,9 +165,7 @@ export function calculateScore(
  * Rank scored signals descending by score and return top N.
  */
 export function rankSignals(signals: ScoredSignal[], topN: number = 5): ScoredSignal[] {
-  return signals
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topN);
+  return signals.sort((a, b) => b.score - a.score).slice(0, topN);
 }
 
 export default {

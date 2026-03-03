@@ -205,11 +205,11 @@ async function processBatch(tickers: string[], interval: string, period: string,
   const pLimit = (await import("p-limit")).default;
   const limit = pLimit(concurrencyLimit);
 
-  const tasks = tickers.map((ticker, index) =>
+  const tasks = tickers.map((ticker) =>
     limit(async () => {
-      // Stagger requests: 2-4 seconds per ticker to avoid rate limiting
-      await delay(index * 2000 + Math.random() * 2000);
       const candles = await fetchHistoricalData(ticker, period, interval);
+      // Small delay after each request to avoid rate limiting (concurrency is already 1)
+      await delay(1500 + Math.random() * 1000);
       if (candles.length > 0) {
         results.push({ ticker, candles });
       }
@@ -245,9 +245,9 @@ export async function fetchAllTickers(tickers: string[], interval: string = "1d"
     const batchResults = await processBatch(batch, interval, period, concurrencyLimit);
     allResults.push(...batchResults);
 
-    // Pause between batches to avoid rate limiting
+    // Pause between batches
     if (i + batchSize < tickers.length) {
-      const batchDelay = 30000 + Math.random() * 10000;
+      const batchDelay = 10000 + Math.random() * 5000;
       logger.info(MODULE, `Batch ${batchNum}/${totalBatches} done. Waiting ${Math.round(batchDelay / 1000)}s before next batch...`);
       await delay(batchDelay);
     }
