@@ -38,7 +38,7 @@ const BATCH_DELAY_MAX_MS = Math.max(BATCH_DELAY_MIN_MS, parseInt(process.env.BAT
 const MAX_RATE_LIMIT_PENALTY_MS = Math.max(5000, parseInt(process.env.MAX_RATE_LIMIT_PENALTY_MS || "15000", 10));
 const IDX_STOCK_LIST_URL = process.env.IDX_STOCK_LIST_URL || "https://www.idx.co.id/primary/StockData/GetSecuritiesStock?start=0&length=9999&code=&sector=&board=&language=id";
 const MIN_REMOTE_TICKER_THRESHOLD = Math.max(50, parseInt(process.env.MIN_REMOTE_TICKER_THRESHOLD || "200", 10));
-const EXCLUDED_BOARDS = (process.env.EXCLUDED_BOARDS || "Watchlist").split(",").map(b => b.trim().toLowerCase());
+const EXCLUDED_BOARDS = (process.env.EXCLUDED_BOARDS || "Watchlist").split(",").map((b) => b.trim().toLowerCase());
 
 const axiosClient = axios.create({
   timeout: REQUEST_TIMEOUT_MS,
@@ -404,8 +404,12 @@ function parseTickersFromIdxJson(data: any): string[] {
   let excludedCount = 0;
 
   for (const item of data.data) {
-    const code = String(item.Code || "").trim().toUpperCase();
-    const board = String(item.ListingBoard || "").trim().toLowerCase();
+    const code = String(item.Code || "")
+      .trim()
+      .toUpperCase();
+    const board = String(item.ListingBoard || "")
+      .trim()
+      .toLowerCase();
 
     if (!code || code.length < 2 || code.length > 8) continue;
     if (!/^[A-Z0-9]+$/.test(code)) continue;
