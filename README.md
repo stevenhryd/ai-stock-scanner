@@ -35,6 +35,27 @@ CAPITAL_AMOUNT=3000000
 RISK_PER_TRADE=0.02
 STOP_LOSS_PCT=0.03
 MAX_SIGNALS_PER_DAY=5
+
+# Universe scan
+SCAN_UNIVERSE=static
+# static | all | idx
+# static = pakai src/config/tickers.json
+# all/idx = coba load universe IDX dari remote source, fallback ke static jika gagal
+MAX_TICKERS_TO_SCAN=0
+# 0 = tidak dibatasi
+
+# Optional tuning untuk stabilitas fetch
+ADAPTIVE_BATCHING=true
+YAHOO_MAX_RETRIES=2
+YAHOO_REQUEST_TIMEOUT_MS=12000
+INTER_REQUEST_DELAY_MIN_MS=350
+INTER_REQUEST_DELAY_MAX_MS=700
+BATCH_DELAY_MIN_MS=1500
+BATCH_DELAY_MAX_MS=3000
+
+# Optional source IDX (override jika punya URL CSV/HTML yang lebih stabil)
+IDX_STOCK_LIST_URL=https://www.idx.co.id/id/data-pasar/data-saham/daftar-saham
+MIN_REMOTE_TICKER_THRESHOLD=200
 ```
 
 ### 3. Build & Run
@@ -77,7 +98,7 @@ RSI > 50          →      RSI 55–70
 ### Scoring System
 
 | Faktor             | Bobot |
-|--------------------|-------|
+| ------------------ | ----- |
 | Breakout Strength  | 30%   |
 | Volume Spike       | 20%   |
 | RSI Strength       | 15%   |
@@ -86,14 +107,14 @@ RSI > 50          →      RSI 55–70
 
 ### Schedule (Asia/Jakarta)
 
-| Job | Waktu | Keterangan |
-|---|---|---|
-| **08:45 WIB** | Full Scan | Pagi hari cek full trend 1D + trigger 4H. Top 5 dikirim & masuk Watchlist. |
-| **12:05 WIB** | 4H Re-Check | Siang hari re-check trigger 4H untuk saham potensial di luar Watchlist. |
-| **15:40 WIB** | Exit Check | Sore hari evaluasi Watchlist. Jika jebol support/RSI drop, kirim **EXIT WARNING**. |
-| **00:00 WIB** | Reset State | Reset counter batas sinyal & bersihkan Watchlist harian. |
+| Job           | Waktu       | Keterangan                                                                         |
+| ------------- | ----------- | ---------------------------------------------------------------------------------- |
+| **08:45 WIB** | Full Scan   | Pagi hari cek full trend 1D + trigger 4H. Top 5 dikirim & masuk Watchlist.         |
+| **12:05 WIB** | 4H Re-Check | Siang hari re-check trigger 4H untuk saham potensial di luar Watchlist.            |
+| **15:40 WIB** | Exit Check  | Sore hari evaluasi Watchlist. Jika jebol support/RSI drop, kirim **EXIT WARNING**. |
+| **00:00 WIB** | Reset State | Reset counter batas sinyal & bersihkan Watchlist harian.                           |
 
-*Sinyal BUY dibatasi maksimal 5 per hari (terkontrol via `dailyState.json`), namun sinyal EXIT tidak dibatasi.*
+_Sinyal BUY dibatasi maksimal 5 per hari (terkontrol via `dailyState.json`), namun sinyal EXIT tidak dibatasi._
 
 ## Deploy ke Railway
 
@@ -104,7 +125,8 @@ RSI > 50          →      RSI 55–70
    - `TELEGRAM_BOT_TOKEN`
    - `TELEGRAM_CHAT_ID`
    - `CAPITAL_AMOUNT`
-   - Dll (lihat `.env.example`)
+   - Dll (lihat .env.example)
+   - `GEMINI_API_KEY` (Opsional - Untuk skor berita saham dari AI)
 5. Railway akan auto-detect `Procfile` dan deploy
 
 ## Struktur Project
@@ -133,6 +155,7 @@ src/
 ## Risk Management
 
 Kalkulasi otomatis berdasarkan:
+
 - **Modal**: Rp 3.000.000 (default, bisa diubah)
 - **Risk per trade**: 2%
 - **Stop Loss**: 3%
@@ -146,6 +169,9 @@ Edit file `src/config/tickers.json` dan tambahkan ticker dengan format `KODE.JK`
 ["BBRI.JK", "BBCA.JK", "TICKER_BARU.JK"]
 ```
 
+Jika ingin scan seluruh universe, set `SCAN_UNIVERSE=all` di `.env`.
+
 ## License
 
 MIT
+

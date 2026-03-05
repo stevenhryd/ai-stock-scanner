@@ -12,10 +12,11 @@
 import fs from "fs";
 import path from "path";
 import config from "../config/index.js";
-import { fetchAllTickers, fetchHistoricalData, TickerData } from "./dataService.js";
+import { fetchAllTickers, updateTickerList, resetFetchSummary } from "./dataService.js";
 import { analyzeDaily, analyze4H, DailyAnalysis, FourHourAnalysis, checkSellCondition, SellSignal } from "./indicatorService.js";
 import { calculateScore, rankSignals, ScoredSignal } from "./scoringService.js";
 import { calculatePositionSize, PositionSizing } from "../utils/riskManagement.js";
+import { getNewsSentiment, AISentiment } from "./newsService.js";
 import logger from "../utils/logger.js";
 
 const MODULE = "SignalService";
@@ -34,7 +35,11 @@ export interface BuySignal {
   fourHourAnalysis: FourHourAnalysis;
   breakdown: ScoredSignal["breakdown"];
   timestamp: Date;
+  aiSentiment?: AISentiment;
 }
+
+const SCAN_UNIVERSE_MODE = (process.env.SCAN_UNIVERSE || "static").toLowerCase();
+const MAX_TICKERS_TO_SCAN = Math.max(0, parseInt(process.env.MAX_TICKERS_TO_SCAN || "0", 10));
 
 /**
  * Get the list of tickers to scan.
@@ -47,7 +52,33 @@ export function getTickerList(): string[] {
     try {
       const raw = fs.readFileSync(tickerPath, "utf-8");
       logger.info(MODULE, `Loaded tickers from: ${tickerPath}`);
-      return JSON.parse(raw) as string[];
+
+      const parsed = JSON.parse(raw) as string[];
+      const normalized = parsed
+        .map((item) =>
+          String(item || "")
+            .trim()
+            .toUpperCase(),
+        )
+        .filter((item) => item.length > 0)
+        .map((item) => (item.endsWith(".JK") ? item : `${item}.JK`));
+
+      const validTickerRegex = /^[A-Z0-9]{2,8}\.JK$/;
+      const validTickers = normalized.filter((item) => validTickerRegex.test(item));
+      const uniqueTickers = Array.from(new Set(validTickers));
+
+      const invalidCount = normalized.length - validTickers.length;
+      const duplicateCount = validTickers.length - uniqueTickers.length;
+
+      if (invalidCount > 0) {
+        logger.warn(MODULE, `Filtered ${invalidCount} invalid ticker format(s).`);
+      }
+
+      if (duplicateCount > 0) {
+        logger.warn(MODULE, `Removed ${duplicateCount} duplicate ticker(s).`);
+      }
+
+      return uniqueTickers;
     } catch {
       // Try next path
     }
@@ -57,12 +88,35 @@ export function getTickerList(): string[] {
   return [];
 }
 
+async function getTickerListForScan(): Promise<string[]> {
+  const staticTickers = getTickerList();
+
+  let scanTickers = staticTickers;
+  if (SCAN_UNIVERSE_MODE === "all" || SCAN_UNIVERSE_MODE === "idx") {
+    const remoteTickers = await updateTickerList();
+    if (remoteTickers.length > 0) {
+      scanTickers = remoteTickers;
+    } else {
+      logger.warn(MODULE, "Using static tickers because remote universe could not be loaded.");
+    }
+  }
+
+  if (MAX_TICKERS_TO_SCAN > 0 && scanTickers.length > MAX_TICKERS_TO_SCAN) {
+    logger.warn(MODULE, `Applying MAX_TICKERS_TO_SCAN=${MAX_TICKERS_TO_SCAN} (from ${scanTickers.length} available).`);
+    scanTickers = scanTickers.slice(0, MAX_TICKERS_TO_SCAN);
+  }
+
+  logger.info(MODULE, `Scan universe mode: ${SCAN_UNIVERSE_MODE}. Effective tickers: ${scanTickers.length}`);
+  return scanTickers;
+}
+
 /**
  * Run the full signal generation pipeline.
  * Returns the top buy signals (max 5).
  */
 export async function generateSignals(): Promise<BuySignal[]> {
-  const tickerList = getTickerList();
+  resetFetchSummary();
+  const tickerList = await getTickerListForScan();
   logger.info(MODULE, `Starting signal scan for ${tickerList.length} tickers...`);
 
   // ── Step 1: Fetch daily data and filter bullish stocks ───────────────
@@ -87,7 +141,10 @@ export async function generateSignals(): Promise<BuySignal[]> {
   }
 
   // ── Step 2: Fetch 4H data for bullish stocks ────────────────────────
-  logger.info(MODULE, "📊 Step 2: Fetching 4H data for bullish stocks...");
+  logger.info(MODULE, "� Cooldown for 15s to reset Yahoo rate limits before 4H scan...");
+  await new Promise((resolve) => setTimeout(resolve, 15000));
+
+  logger.info(MODULE, "�📊 Step 2: Fetching 4H data for bullish stocks...");
   const bullishTickers = bullishStocks.map((s) => s.ticker);
 
   // Yahoo Finance uses '1h' interval — we'll fetch hourly and treat it as 4H proxy
@@ -187,6 +244,27 @@ export async function generateSignals(): Promise<BuySignal[]> {
       timestamp: new Date(),
     };
   });
+
+  // ── Step 5: AI News Sentiment Analysis (only for top signals) ───────
+  if (config.ai.geminiApiKey && buySignals.length > 0) {
+    logger.info(MODULE, `🤖 Step 5: Running AI News Sentiment for ${buySignals.length} signal(s)...`);
+    for (const signal of buySignals) {
+      try {
+        const sentiment = await getNewsSentiment(signal.ticker);
+        if (sentiment) {
+          signal.aiSentiment = sentiment;
+          // Adjust final score: add up to ±5 points based on AI sentiment (-10..+10 → -5..+5)
+          const aiBonus = Math.round(sentiment.score * 0.5);
+          signal.score = Math.max(0, Math.min(100, signal.score + aiBonus));
+          logger.info(MODULE, `🤖 ${signal.ticker} — AI Sentiment: ${sentiment.score > 0 ? "+" : ""}${sentiment.score}/10 | Adjusted Score: ${signal.score} | ${sentiment.summary}`);
+        }
+      } catch (err: any) {
+        logger.warn(MODULE, `⚠️ AI Sentiment failed for ${signal.ticker}: ${err.message}`);
+      }
+    }
+  } else if (!config.ai.geminiApiKey) {
+    logger.info(MODULE, "⏭️ Skipping AI Sentiment (GEMINI_API_KEY not set).");
+  }
 
   logger.info(MODULE, `✨ Generated ${buySignals.length} buy signal(s).`);
 
