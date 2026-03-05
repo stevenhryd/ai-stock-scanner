@@ -2,10 +2,10 @@
  * Advanced Scheduler
  *
  * Schedules 4 specific jobs with exact timezones:
- *   1️⃣ 16:30 WIB: Full Scan & Ranking (setelah market tutup, selesai sebelum market buka)
+ *   1️⃣ 06:30 WIB: Full Scan & Ranking (pagi sebelum market buka 09:00, selesai ~07:30-08:00)
  *   2️⃣ 12:05 WIB: Midday Hold/Exit Check (cek sinyal pagi)
  *   3️⃣ 15:40 WIB: Exit / Momentum Check
- *   4️⃣ 16:15 WIB: Reset Daily Counter & Watchlist
+ *   4️⃣ 06:15 WIB: Reset Daily Counter & Watchlist (sebelum scan pagi)
  */
 
 import cron from "node-cron";
@@ -26,17 +26,17 @@ let job1540: cron.ScheduledTask | null = null;
 let job1615: cron.ScheduledTask | null = null;
 
 // ==========================================
-// 1️⃣ 16:30 WIB — FULL SCAN (SETELAH MARKET TUTUP)
+// 1️⃣ 06:30 WIB — FULL SCAN (PAGI SEBELUM MARKET BUKA)
 // ==========================================
 async function runMorningScan(): Promise<void> {
   const startedAt = Date.now();
 
   logger.info(MODULE, "🚀 ============================================");
-  logger.info(MODULE, "🚀  [16:30] Starting full scan (post-market)...");
+  logger.info(MODULE, "🚀  [06:30] Starting full scan (pre-market)...");
   logger.info(MODULE, "🚀 ============================================");
 
   try {
-    await sendMessage(`⏳ *[16:30] Full Scan Dimulai*\n\nScanner mulai memproses ticker sekarang.\nProses berjalan setelah market tutup agar selesai sebelum market buka besok (09:00 WIB).`);
+    await sendMessage(`⏳ *[06:30] Full Scan Dimulai*\n\nScanner mulai memproses ticker sekarang.\nProses berjalan pagi hari agar selesai sebelum market buka (09:00 WIB).`);
 
     const signals = await generateSignals();
     const durationMin = ((Date.now() - startedAt) / 60000).toFixed(1);
@@ -47,7 +47,7 @@ async function runMorningScan(): Promise<void> {
       addWatchlistPosition(signal.ticker, signal.entry, signal.stopLoss, signal.takeProfit, signal.score);
     });
 
-    logger.info(MODULE, `[16:30] Scan completed. Found ${signals.length} signal(s).`);
+    logger.info(MODULE, `[06:30] Scan completed. Found ${signals.length} signal(s).`);
 
     // Kirim notifikasi jika ada ticker yang gagal diambil datanya
     const summary = getFetchSummary();
@@ -330,10 +330,10 @@ async function runExitCheck(): Promise<void> {
 }
 
 // ==========================================
-// 4️⃣ 16:15 WIB — RESET DAILY STATE
+// 4️⃣ 06:15 WIB — RESET DAILY STATE
 // ==========================================
 async function runDailyReset(): Promise<void> {
-  logger.info(MODULE, "🔄 [16:15] Running daily state reset...");
+  logger.info(MODULE, "🔄 [06:15] Running daily state reset...");
 
   // Get active positions BEFORE reset for notification
   const carriedPositions = getActivePositions();
@@ -347,10 +347,10 @@ async function runDailyReset(): Promise<void> {
       return `📌 ${p.ticker.replace(".JK", "")} — Entry: ${formatRupiahSimple(p.entry)} | SL: ${formatRupiahSimple(p.stopLoss)} | TP: ${formatRupiahSimple(p.takeProfit)} (Hari ke-${daysSince + 1})`;
     });
     await sendMessage(
-      `🔄 *[16:15] Daily Reset*\n\n` + `📊 Counter harian direset.\n` + `📌 *${carriedPositions.length} posisi aktif dibawa ke hari berikutnya:*\n\n` + lines.join("\n") + `\n\n_Posisi tetap dipantau sampai SL/TP tercapai atau exit manual._`,
+      `🔄 *[06:15] Daily Reset*\n\n` + `📊 Counter harian direset.\n` + `📌 *${carriedPositions.length} posisi aktif dibawa ke hari berikutnya:*\n\n` + lines.join("\n") + `\n\n_Posisi tetap dipantau sampai SL/TP tercapai atau exit manual._`,
     );
   } else {
-    await sendMessage(`🔄 *[16:15] Daily Reset*\n\nCounter harian direset. Tidak ada posisi aktif.\n\n_Scan dimulai 16:30 WIB. 👋_`);
+    await sendMessage(`🔄 *[06:15] Daily Reset*\n\nCounter harian direset. Tidak ada posisi aktif.\n\n_Scan dimulai 06:30 WIB. 👋_`);
   }
 }
 
@@ -360,9 +360,9 @@ async function runDailyReset(): Promise<void> {
 export function startScheduler(): void {
   logger.info(MODULE, `📅 Starting advanced scheduler (Timezone: ${TIMEZONE})...`);
 
-  // 1️⃣ 16:30 WIB (Mon-Fri) — Full Scan setelah market tutup
-  job1630 = cron.schedule("30 16 * * 1-5", runMorningScan, { timezone: TIMEZONE });
-  logger.info(MODULE, `   [16:30] Full Scan scheduled.`);
+  // 1️⃣ 06:30 WIB (Mon-Fri) — Full Scan pagi sebelum market buka
+  job1630 = cron.schedule("30 6 * * 1-5", runMorningScan, { timezone: TIMEZONE });
+  logger.info(MODULE, `   [06:30] Full Scan scheduled.`);
 
   // 2️⃣ 12:05 WIB (Mon-Fri) — Hold/Exit check sinyal pagi
   job1205 = cron.schedule("5 12 * * 1-5", runMiddayCheck, { timezone: TIMEZONE });
@@ -372,9 +372,9 @@ export function startScheduler(): void {
   job1540 = cron.schedule("40 15 * * 1-5", runExitCheck, { timezone: TIMEZONE });
   logger.info(MODULE, `   [15:40] Exit Check scheduled.`);
 
-  // 4️⃣ 16:15 WIB (Mon-Fri) — Reset sebelum scan
-  job1615 = cron.schedule("15 16 * * 1-5", runDailyReset, { timezone: TIMEZONE });
-  logger.info(MODULE, `   [16:15] Daily Reset scheduled.`);
+  // 4️⃣ 06:15 WIB (Mon-Fri) — Reset sebelum scan pagi
+  job1615 = cron.schedule("15 6 * * 1-5", runDailyReset, { timezone: TIMEZONE });
+  logger.info(MODULE, `   [06:15] Daily Reset scheduled.`);
 
   logger.info(MODULE, "✅ All cron jobs active.");
 }

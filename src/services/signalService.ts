@@ -12,11 +12,12 @@
 import fs from "fs";
 import path from "path";
 import config from "../config/index.js";
-import { fetchAllTickers, updateTickerList, resetFetchSummary } from "./dataService.js";
+import { fetchAllTickers, updateTickerList, resetFetchSummary, getTopTickersByVolume, initYahooSession, probeRateLimit } from "./dataService.js";
 import { analyzeDaily, analyze4H, DailyAnalysis, FourHourAnalysis, checkSellCondition, SellSignal } from "./indicatorService.js";
 import { calculateScore, rankSignals, ScoredSignal } from "./scoringService.js";
 import { calculatePositionSize, PositionSizing } from "../utils/riskManagement.js";
 import { getNewsSentiment, AISentiment } from "./newsService.js";
+import { sendMessage } from "../telegram/telegramService.js";
 import logger from "../utils/logger.js";
 
 const MODULE = "SignalService";
@@ -38,8 +39,10 @@ export interface BuySignal {
   aiSentiment?: AISentiment;
 }
 
-const SCAN_UNIVERSE_MODE = (process.env.SCAN_UNIVERSE || "static").toLowerCase();
+const SCAN_UNIVERSE_MODE = (process.env.SCAN_UNIVERSE || "idx").toLowerCase();
 const MAX_TICKERS_TO_SCAN = Math.max(0, parseInt(process.env.MAX_TICKERS_TO_SCAN || "0", 10));
+const TOP_TICKERS_LIMIT = Math.max(50, parseInt(process.env.TOP_TICKERS_LIMIT || "300", 10));
+const ENABLE_VOLUME_PRESCREEN = (process.env.ENABLE_VOLUME_PRESCREEN || "true").toLowerCase() !== "false";
 
 /**
  * Get the list of tickers to scan.
@@ -101,6 +104,24 @@ async function getTickerListForScan(): Promise<string[]> {
     }
   }
 
+  // Volume-based pre-screening: fetch quotes in batch and select top N by trading volume
+  if (ENABLE_VOLUME_PRESCREEN && scanTickers.length > TOP_TICKERS_LIMIT) {
+    logger.info(MODULE, `📊 Volume pre-screening enabled. Narrowing ${scanTickers.length} tickers to top ${TOP_TICKERS_LIMIT}...`);
+    try {
+      const topTickers = await getTopTickersByVolume(scanTickers, TOP_TICKERS_LIMIT);
+      if (topTickers.length > 0) {
+        logger.info(MODULE, `✅ Pre-screening selected ${topTickers.length} most active tickers.`);
+        scanTickers = topTickers;
+      } else {
+        logger.warn(MODULE, "Pre-screening returned empty. Falling back to truncation.");
+        scanTickers = scanTickers.slice(0, TOP_TICKERS_LIMIT);
+      }
+    } catch (error: any) {
+      logger.warn(MODULE, `Pre-screening failed: ${error.message}. Falling back to truncation.`);
+      scanTickers = scanTickers.slice(0, TOP_TICKERS_LIMIT);
+    }
+  }
+
   if (MAX_TICKERS_TO_SCAN > 0 && scanTickers.length > MAX_TICKERS_TO_SCAN) {
     logger.warn(MODULE, `Applying MAX_TICKERS_TO_SCAN=${MAX_TICKERS_TO_SCAN} (from ${scanTickers.length} available).`);
     scanTickers = scanTickers.slice(0, MAX_TICKERS_TO_SCAN);
@@ -116,8 +137,45 @@ async function getTickerListForScan(): Promise<string[]> {
  */
 export async function generateSignals(): Promise<BuySignal[]> {
   resetFetchSummary();
+
+  // Initialize Yahoo session (cookie+crumb) before scanning
+  await initYahooSession();
+
+  // Probe Yahoo rate limit — if IP is blocked, wait before wasting API calls
+  logger.info(MODULE, "🔍 Probing Yahoo rate limit status...");
+  await probeRateLimit(3);
+
   const tickerList = await getTickerListForScan();
   logger.info(MODULE, `Starting signal scan for ${tickerList.length} tickers...`);
+
+  // ── Send pre-screening results via Telegram as quick reference ──────
+  try {
+    const now = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
+    const tickerChunks: string[] = [];
+    for (let i = 0; i < tickerList.length; i += 10) {
+      tickerChunks.push(
+        tickerList
+          .slice(i, i + 10)
+          .map((t) => t.replace(".JK", ""))
+          .join(", "),
+      );
+    }
+    const prescreenMsg = [
+      `📊 <b>Pre-Screening Selesai</b>`,
+      `📅 ${now}`,
+      ``,
+      `Top ${tickerList.length} saham paling aktif (by volume):`,
+      ``,
+      ...tickerChunks,
+      ``,
+      `⏳ Sedang mengambil data candle untuk analisis...`,
+      `Hasil sinyal akan dikirim setelah selesai.`,
+    ].join("\n");
+    await sendMessage(prescreenMsg);
+    logger.info(MODULE, `✅ Pre-screening results sent to Telegram (${tickerList.length} tickers)`);
+  } catch (err: any) {
+    logger.warn(MODULE, `Failed to send pre-screening to Telegram: ${err.message}`);
+  }
 
   // ── Step 1: Fetch daily data and filter bullish stocks ───────────────
   logger.info(MODULE, "📊 Step 1: Fetching daily (1D) data...");

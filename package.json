@@ -7,6 +7,9 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
+    "test-scan": "npm run build && ts-node test-scan.ts",
+    "test-scan-build": "npm run build && node dist/test-scan.js",
+    "scan": "npm run dev -- --scan",
     "clean": "rimraf dist"
   },
   "keywords": [
