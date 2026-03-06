@@ -30,6 +30,9 @@ let job0745: cron.ScheduledTask | null = null;
 async function runMorningScan(): Promise<void> {
   const startedAt = Date.now();
 
+  // Reset signal counter so every scan can send fresh signals
+  resetDailyState();
+
   logger.info(MODULE, "🚀 ============================================");
   logger.info(MODULE, "🚀  [08:00] Starting full scan (pre-market)...");
   logger.info(MODULE, "🚀 ============================================");
