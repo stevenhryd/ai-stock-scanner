@@ -1,23 +1,25 @@
 /**
  * Signal Service
  *
- * Orchestrates the full signal generation pipeline:
- *   1. Fetch daily data → analyze 1D trend
- *   2. Filter to bullish stocks only
- *   3. Fetch 4H data → check entry triggers
- *   4. Score and rank signals
- *   5. Return top 5 buy signals
+ * Orchestrates the full signal generation pipeline using TradingView data:
+ *   1. Fetch 1D + 4H indicators from TradingView Scanner API (batch)
+ *   2. Filter to bullish stocks (1D trend filter)
+ *   3. Check 4H entry triggers (breakout, volume, RSI, MACD, ADX)
+ *   4. Fetch news sentiment from Yahoo Finance (keyword-based)
+ *   5. Score and rank signals
+ *   6. Position sizing and return top 5
  */
 
 import fs from "fs";
 import path from "path";
 import config from "../config/index.js";
-import { fetchAllTickers, updateTickerList, resetFetchSummary, getTopTickersByVolume, initYahooSession, probeRateLimit } from "./dataService.js";
+import { fetchAllTickerAnalysis, resetFetchSummary, TradingViewIndicators } from "./dataService.js";
 import { analyzeDaily, analyze4H, DailyAnalysis, FourHourAnalysis, checkSellCondition, SellSignal } from "./indicatorService.js";
 import { calculateScore, rankSignals, ScoredSignal } from "./scoringService.js";
-import { calculatePositionSize, PositionSizing } from "../utils/riskManagement.js";
-import { getNewsSentiment, AISentiment } from "./newsService.js";
+import { calculatePositionSize } from "../utils/riskManagement.js";
+import { getNewsSentiment, NewsSentiment } from "./newsService.js";
 import { sendMessage } from "../telegram/telegramService.js";
+import { fetchTradingViewBatch } from "./dataService.js";
 import logger from "../utils/logger.js";
 
 const MODULE = "SignalService";
@@ -36,19 +38,13 @@ export interface BuySignal {
   fourHourAnalysis: FourHourAnalysis;
   breakdown: ScoredSignal["breakdown"];
   timestamp: Date;
-  aiSentiment?: AISentiment;
+  newsSentiment?: NewsSentiment;
 }
 
-const SCAN_UNIVERSE_MODE = (process.env.SCAN_UNIVERSE || "idx").toLowerCase();
-const MAX_TICKERS_TO_SCAN = Math.max(0, parseInt(process.env.MAX_TICKERS_TO_SCAN || "0", 10));
-const TOP_TICKERS_LIMIT = Math.max(50, parseInt(process.env.TOP_TICKERS_LIMIT || "300", 10));
-const ENABLE_VOLUME_PRESCREEN = (process.env.ENABLE_VOLUME_PRESCREEN || "true").toLowerCase() !== "false";
-
 /**
- * Get the list of tickers to scan.
+ * Get the list of tickers to scan from config files.
  */
 export function getTickerList(): string[] {
-  // Try multiple locations: project root config, src config, and dist config
   const possiblePaths = [path.resolve(process.cwd(), "src/config/tickers.json"), path.resolve(__dirname, "../config/tickers.json"), path.resolve(process.cwd(), "tickers.json")];
 
   for (const tickerPath of possiblePaths) {
@@ -70,17 +66,6 @@ export function getTickerList(): string[] {
       const validTickers = normalized.filter((item) => validTickerRegex.test(item));
       const uniqueTickers = Array.from(new Set(validTickers));
 
-      const invalidCount = normalized.length - validTickers.length;
-      const duplicateCount = validTickers.length - uniqueTickers.length;
-
-      if (invalidCount > 0) {
-        logger.warn(MODULE, `Filtered ${invalidCount} invalid ticker format(s).`);
-      }
-
-      if (duplicateCount > 0) {
-        logger.warn(MODULE, `Removed ${duplicateCount} duplicate ticker(s).`);
-      }
-
       return uniqueTickers;
     } catch {
       // Try next path
@@ -91,44 +76,41 @@ export function getTickerList(): string[] {
   return [];
 }
 
-async function getTickerListForScan(): Promise<string[]> {
-  const staticTickers = getTickerList();
+/**
+ * Get the full ticker universe for scanning.
+ * Tries to load tickers_full.json first (800+ IDX tickers), falls back to tickers.json.
+ */
+function getFullTickerList(): string[] {
+  const fullListPaths = [path.resolve(process.cwd(), "src/config/tickers_full.json"), path.resolve(__dirname, "../config/tickers_full.json")];
 
-  let scanTickers = staticTickers;
-  if (SCAN_UNIVERSE_MODE === "all" || SCAN_UNIVERSE_MODE === "idx") {
-    const remoteTickers = await updateTickerList();
-    if (remoteTickers.length > 0) {
-      scanTickers = remoteTickers;
-    } else {
-      logger.warn(MODULE, "Using static tickers because remote universe could not be loaded.");
-    }
-  }
-
-  // Volume-based pre-screening: fetch quotes in batch and select top N by trading volume
-  if (ENABLE_VOLUME_PRESCREEN && scanTickers.length > TOP_TICKERS_LIMIT) {
-    logger.info(MODULE, `📊 Volume pre-screening enabled. Narrowing ${scanTickers.length} tickers to top ${TOP_TICKERS_LIMIT}...`);
+  for (const fullPath of fullListPaths) {
     try {
-      const topTickers = await getTopTickersByVolume(scanTickers, TOP_TICKERS_LIMIT);
-      if (topTickers.length > 0) {
-        logger.info(MODULE, `✅ Pre-screening selected ${topTickers.length} most active tickers.`);
-        scanTickers = topTickers;
-      } else {
-        logger.warn(MODULE, "Pre-screening returned empty. Falling back to truncation.");
-        scanTickers = scanTickers.slice(0, TOP_TICKERS_LIMIT);
+      const raw = fs.readFileSync(fullPath, "utf-8");
+      const parsed = JSON.parse(raw) as string[];
+      const normalized = parsed
+        .map((item) =>
+          String(item || "")
+            .trim()
+            .toUpperCase(),
+        )
+        .filter((item) => item.length > 0)
+        .map((item) => (item.endsWith(".JK") ? item : `${item}.JK`));
+
+      const validTickerRegex = /^[A-Z0-9]{2,8}\.JK$/;
+      const uniqueTickers = Array.from(new Set(normalized.filter((item) => validTickerRegex.test(item))));
+
+      if (uniqueTickers.length > 100) {
+        logger.info(MODULE, `Loaded full ticker list: ${uniqueTickers.length} tickers from ${fullPath}`);
+        return uniqueTickers;
       }
-    } catch (error: any) {
-      logger.warn(MODULE, `Pre-screening failed: ${error.message}. Falling back to truncation.`);
-      scanTickers = scanTickers.slice(0, TOP_TICKERS_LIMIT);
+    } catch {
+      // Try next path
     }
   }
 
-  if (MAX_TICKERS_TO_SCAN > 0 && scanTickers.length > MAX_TICKERS_TO_SCAN) {
-    logger.warn(MODULE, `Applying MAX_TICKERS_TO_SCAN=${MAX_TICKERS_TO_SCAN} (from ${scanTickers.length} available).`);
-    scanTickers = scanTickers.slice(0, MAX_TICKERS_TO_SCAN);
-  }
-
-  logger.info(MODULE, `Scan universe mode: ${SCAN_UNIVERSE_MODE}. Effective tickers: ${scanTickers.length}`);
-  return scanTickers;
+  // Fallback to standard tickers.json
+  logger.warn(MODULE, "Full ticker list not found, falling back to tickers.json");
+  return getTickerList();
 }
 
 /**
@@ -138,153 +120,182 @@ async function getTickerListForScan(): Promise<string[]> {
 export async function generateSignals(): Promise<BuySignal[]> {
   resetFetchSummary();
 
-  // Initialize Yahoo session (cookie+crumb) before scanning
-  await initYahooSession();
+  const tickerList = getFullTickerList();
+  logger.info(MODULE, `Starting signal scan for ${tickerList.length} IDX tickers...`);
 
-  // Probe Yahoo rate limit — if IP is blocked, wait before wasting API calls
-  logger.info(MODULE, "🔍 Probing Yahoo rate limit status...");
-  await probeRateLimit(3);
-
-  const tickerList = await getTickerListForScan();
-  logger.info(MODULE, `Starting signal scan for ${tickerList.length} tickers...`);
-
-  // ── Send pre-screening results via Telegram as quick reference ──────
+  // ── Notify Telegram ──────────────────────────────────────────────────
   try {
     const now = new Date().toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
-    const tickerChunks: string[] = [];
-    for (let i = 0; i < tickerList.length; i += 10) {
-      tickerChunks.push(
-        tickerList
-          .slice(i, i + 10)
-          .map((t) => t.replace(".JK", ""))
-          .join(", "),
-      );
-    }
-    const prescreenMsg = [
-      `📊 <b>Pre-Screening Selesai</b>`,
-      `📅 ${now}`,
-      ``,
-      `Top ${tickerList.length} saham paling aktif (by volume):`,
-      ``,
-      ...tickerChunks,
-      ``,
-      `⏳ Sedang mengambil data candle untuk analisis...`,
-      `Hasil sinyal akan dikirim setelah selesai.`,
-    ].join("\n");
-    await sendMessage(prescreenMsg);
-    logger.info(MODULE, `✅ Pre-screening results sent to Telegram (${tickerList.length} tickers)`);
-  } catch (err: any) {
-    logger.warn(MODULE, `Failed to send pre-screening to Telegram: ${err.message}`);
+    await sendMessage(`📊 *Scan Dimulai*\n📅 ${now}\n\n` + `🏦 Exchange: IDX\n` + `📈 Total ticker: ${tickerList.length}\n` + `📊 Data source: TradingView (1D + 4H)\n` + `📰 Berita: Yahoo Finance\n\n` + `⏳ Sedang mengambil data...`);
+  } catch {
+    // Non-critical
   }
 
-  // ── Step 1: Fetch daily data and filter bullish stocks ───────────────
-  logger.info(MODULE, "📊 Step 1: Fetching daily (1D) data...");
-  const dailyDataList = await fetchAllTickers(tickerList, "1d", "6mo");
+  // ── Step 1: Fetch all indicators from TradingView (1D + 4H) ─────────
+  logger.info(MODULE, "📊 Step 1: Fetching TradingView indicators (1D + 4H)...");
+  const allAnalyses = await fetchAllTickerAnalysis(tickerList);
 
-  const bullishStocks: { ticker: string; dailyAnalysis: DailyAnalysis }[] = [];
+  // ── Step 2: Filter bullish stocks using 1D data ──────────────────────
+  logger.info(MODULE, "📈 Step 2: Filtering bullish stocks (1D trend)...");
+  const bullishStocks: {
+    ticker: string;
+    dailyAnalysis: DailyAnalysis;
+    fourHourIndicators: TradingViewIndicators;
+  }[] = [];
 
-  for (const { ticker, candles } of dailyDataList) {
-    const daily = analyzeDaily(candles);
-    if (daily && daily.isBullish) {
-      bullishStocks.push({ ticker, dailyAnalysis: daily });
-      logger.info(MODULE, `✅ ${ticker} — 1D BULLISH (RSI: ${daily.rsi.toFixed(1)}, Close: ${daily.close})`);
+  // Minimum price (Rp) — exclude penny stocks which are volatile and unreliable
+  const MIN_PRICE = 100;
+  // Minimum average daily volume — exclude illiquid stocks
+  const MIN_AVG_VOLUME = 500_000;
+
+  for (const { ticker, daily, fourHour } of allAnalyses) {
+    if (!daily || !fourHour) continue;
+
+    // Liquidity gate: skip penny stocks and illiquid tickers
+    if (daily.close < MIN_PRICE) {
+      logger.debug(MODULE, `❌ ${ticker} — Price too low (Rp ${daily.close} < ${MIN_PRICE})`);
+      continue;
     }
+    if (daily.avgVolume20 > 0 && daily.avgVolume20 < MIN_AVG_VOLUME) {
+      logger.debug(MODULE, `❌ ${ticker} — Avg volume too low (${Math.round(daily.avgVolume20).toLocaleString()} < ${MIN_AVG_VOLUME.toLocaleString()})`);
+      continue;
+    }
+
+    const dailyResult = analyzeDaily(daily);
+    if (!dailyResult || !dailyResult.isBullish) continue;
+
+    bullishStocks.push({
+      ticker,
+      dailyAnalysis: dailyResult,
+      fourHourIndicators: fourHour,
+    });
+
+    logger.debug(MODULE, `✅ ${ticker} — 1D BULLISH (RSI: ${daily.rsi.toFixed(1)}, Close: ${daily.close})`);
   }
 
-  logger.info(MODULE, `📈 ${bullishStocks.length}/${dailyDataList.length} stocks passed 1D trend filter.`);
+  logger.info(MODULE, `📈 ${bullishStocks.length}/${allAnalyses.length} stocks passed 1D trend filter.`);
 
   if (bullishStocks.length === 0) {
     logger.info(MODULE, "No bullish stocks found. Skipping 4H analysis.");
     return [];
   }
 
-  // ── Step 2: Fetch 4H data for bullish stocks ────────────────────────
-  logger.info(MODULE, "� Cooldown for 15s to reset Yahoo rate limits before 4H scan...");
-  await new Promise((resolve) => setTimeout(resolve, 15000));
-
-  logger.info(MODULE, "�📊 Step 2: Fetching 4H data for bullish stocks...");
-  const bullishTickers = bullishStocks.map((s) => s.ticker);
-
-  // Yahoo Finance uses '1h' interval — we'll fetch hourly and treat it as 4H proxy
-  // (Yahoo doesn't support 4h interval natively, so we use 1h with 1mo period)
-  const fourHourDataList = await fetchAllTickers(bullishTickers, "1h", "1mo");
-
   // ── Step 3: Analyze 4H data and check buy triggers ──────────────────
   logger.info(MODULE, "🧠 Step 3: Analyzing 4H entry triggers...");
-  const scoredSignals: ScoredSignal[] = [];
+  const MIN_SIGNAL_SCORE = 70;
 
-  // Hard quality gates — must ALL pass before scoring
-  const MIN_BREAKOUT_STRENGTH = 1.0; // at least 1% above 5-candle high
-  const MIN_ADX = 20; // minimum trend strength
-  const MIN_SIGNAL_SCORE = 70; // minimum composite score to send
+  const candidates: {
+    ticker: string;
+    dailyAnalysis: DailyAnalysis;
+    fourHourAnalysis: FourHourAnalysis;
+  }[] = [];
 
-  for (const { ticker, candles } of fourHourDataList) {
-    // Simulate 4H by taking every 4th candle from 1H data
-    const fourHourCandles = candles.filter((_, i) => i % 4 === 3 || i === candles.length - 1);
-
-    const analysis4H = analyze4H(fourHourCandles);
+  for (const { ticker, dailyAnalysis, fourHourIndicators } of bullishStocks) {
+    const analysis4H = analyze4H(fourHourIndicators);
     if (!analysis4H) continue;
 
-    // ── Hard filter gate ────────────────────────────────────────────────
-    // 1. Classic 4H breakout / volume / RSI checks
-    if (!analysis4H.breakoutDetected || !analysis4H.volumeSpike || !analysis4H.rsiInRange) {
-      logger.debug(MODULE, `❌ ${ticker} — No 4H buy trigger (BO/Vol/RSI)`);
-      continue;
-    }
-    // 2. Breakout candle must be bullish (close > open) — avoid shooting-star breakouts
-    if (!analysis4H.isBullishCandle) {
-      logger.debug(MODULE, `❌ ${ticker} — Breakout candle not bullish (possible reversal bar)`);
-      continue;
-    }
-    // 3. Minimum breakout strength to avoid thin/false breakouts
-    if (analysis4H.breakoutStrength < MIN_BREAKOUT_STRENGTH) {
-      logger.debug(MODULE, `❌ ${ticker} — Breakout too weak (${analysis4H.breakoutStrength.toFixed(2)}% < ${MIN_BREAKOUT_STRENGTH}%)`);
-      continue;
-    }
-    // 4. MACD must be bullish (momentum confirmation)
-    if (!analysis4H.macdBullish) {
-      logger.debug(MODULE, `❌ ${ticker} — MACD not bullish (no momentum confirmation)`);
-      continue;
-    }
-    // 5. ADX must indicate a real trend (no choppy market entries)
-    if (analysis4H.adx < MIN_ADX) {
-      logger.debug(MODULE, `❌ ${ticker} — ADX too low (${analysis4H.adx.toFixed(1)} < ${MIN_ADX}) — choppy market`);
-      continue;
-    }
-    // ── End hard filter gate ────────────────────────────────────────────
+    // ── Scoring-based filter — count passing conditions ───────────────
+    let passCount = 0;
+    let totalChecks = 0;
+    const reasons: string[] = [];
 
-    // Get the daily analysis for this ticker
-    const dailyData = bullishStocks.find((s) => s.ticker === ticker);
-    if (!dailyData) continue;
+    // 1. Breakout (close > SMA20 or EMA20) — important
+    totalChecks++;
+    if (analysis4H.breakoutDetected) {
+      passCount++;
+    } else {
+      reasons.push("no breakout");
+    }
 
-    // Score the signal
-    const scored = calculateScore(ticker, dailyData.dailyAnalysis, analysis4H);
+    // 2. Volume spike (>1.2x avg)
+    totalChecks++;
+    if (analysis4H.volumeSpike) {
+      passCount++;
+    } else {
+      reasons.push(`vol ${analysis4H.volumeMultiple.toFixed(1)}x`);
+    }
 
-    // Enforce minimum composite score
+    // 3. RSI in range (45-80)
+    totalChecks++;
+    if (analysis4H.rsiInRange) {
+      passCount++;
+    } else {
+      reasons.push(`RSI ${analysis4H.rsi.toFixed(1)}`);
+    }
+
+    // 4. MACD bullish
+    totalChecks++;
+    if (analysis4H.macdBullish) {
+      passCount++;
+    } else {
+      reasons.push("MACD bearish");
+    }
+
+    // 5. TradingView recommendation > 0 (neutral-to-buy, not sell)
+    totalChecks++;
+    if (analysis4H.recommendAll > 0) {
+      passCount++;
+    } else {
+      reasons.push(`TVRec ${analysis4H.recommendAll.toFixed(2)}`);
+    }
+
+    // Must pass at least 4 of 5 conditions
+    if (passCount < 4) {
+      logger.debug(MODULE, `❌ ${ticker} — ${passCount}/${totalChecks} conditions (${reasons.join(", ")})`);
+      continue;
+    }
+
+    candidates.push({ ticker, dailyAnalysis, fourHourAnalysis: analysis4H });
+
+    logger.info(MODULE, `🎯 ${ticker} — 4H BUY (${passCount}/${totalChecks}) RSI: ${analysis4H.rsi.toFixed(1)} | ADX: ${analysis4H.adx.toFixed(1)} | MACD: ${analysis4H.macdBullish ? "✅" : "❌"} | TV Rec: ${analysis4H.recommendAll.toFixed(2)}`);
+  }
+
+  logger.info(MODULE, `Found ${candidates.length} candidates passing filters.`);
+
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  // ── Step 4: Fetch news sentiment from Yahoo Finance ─────────────────
+  logger.info(MODULE, `📰 Step 4: Fetching Yahoo Finance news for ${candidates.length} candidate(s)...`);
+
+  const sentimentMap = new Map<string, NewsSentiment>();
+  for (const { ticker } of candidates) {
+    try {
+      const sentiment = await getNewsSentiment(ticker);
+      if (sentiment) {
+        sentimentMap.set(ticker, sentiment);
+        logger.info(MODULE, `📰 ${ticker} — Sentiment: ${sentiment.score > 0 ? "+" : ""}${sentiment.score}/10 | ${sentiment.summary}`);
+      }
+    } catch (err: any) {
+      logger.warn(MODULE, `⚠️ News fetch failed for ${ticker}: ${err.message}`);
+    }
+    // Small delay between Yahoo requests
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  // ── Step 5: Score and rank ──────────────────────────────────────────
+  logger.info(MODULE, "🏆 Step 5: Scoring and ranking signals...");
+
+  const scoredSignals: ScoredSignal[] = [];
+  for (const { ticker, dailyAnalysis, fourHourAnalysis } of candidates) {
+    const sentiment = sentimentMap.get(ticker);
+    const scored = calculateScore(ticker, dailyAnalysis, fourHourAnalysis, sentiment);
+
     if (scored.score < MIN_SIGNAL_SCORE) {
       logger.debug(MODULE, `❌ ${ticker} — Score too low (${scored.score} < ${MIN_SIGNAL_SCORE})`);
       continue;
     }
 
     scoredSignals.push(scored);
-
-    logger.info(MODULE, `🎯 ${ticker} — BUY TRIGGER HIT! Score: ${scored.score} | BO: ${analysis4H.breakoutStrength.toFixed(2)}% | ADX: ${analysis4H.adx.toFixed(1)} | MACD: ✅`);
   }
 
-  // ── Step 4: Rank and return top signals ─────────────────────────────
-  logger.info(MODULE, `🏆 Step 4: Ranking ${scoredSignals.length} signals...`);
   const topSignals = rankSignals(scoredSignals, config.signal.maxPerDay);
 
-  // Convert to BuySignal with position sizing (ATR-based dynamic stop loss)
+  // ── Step 6: Convert to BuySignal with position sizing ───────────────
   const buySignals: BuySignal[] = topSignals.map((signal) => {
     const entryPrice = signal.fourHourAnalysis.close;
-    const position = calculatePositionSize(
-      entryPrice,
-      undefined,
-      undefined,
-      undefined,
-      signal.fourHourAnalysis.atr, // pass ATR for dynamic SL
-    );
+    const position = calculatePositionSize(entryPrice, undefined, undefined, undefined, signal.fourHourAnalysis.atr);
 
     return {
       ticker: signal.ticker,
@@ -300,55 +311,41 @@ export async function generateSignals(): Promise<BuySignal[]> {
       fourHourAnalysis: signal.fourHourAnalysis,
       breakdown: signal.breakdown,
       timestamp: new Date(),
+      newsSentiment: signal.newsSentiment,
     };
   });
 
-  // ── Step 5: AI News Sentiment Analysis (only for top signals) ───────
-  if (config.ai.geminiApiKey && buySignals.length > 0) {
-    logger.info(MODULE, `🤖 Step 5: Running AI News Sentiment for ${buySignals.length} signal(s)...`);
-    for (const signal of buySignals) {
-      try {
-        const sentiment = await getNewsSentiment(signal.ticker);
-        if (sentiment) {
-          signal.aiSentiment = sentiment;
-          // Adjust final score: add up to ±5 points based on AI sentiment (-10..+10 → -5..+5)
-          const aiBonus = Math.round(sentiment.score * 0.5);
-          signal.score = Math.max(0, Math.min(100, signal.score + aiBonus));
-          logger.info(MODULE, `🤖 ${signal.ticker} — AI Sentiment: ${sentiment.score > 0 ? "+" : ""}${sentiment.score}/10 | Adjusted Score: ${signal.score} | ${sentiment.summary}`);
-        }
-      } catch (err: any) {
-        logger.warn(MODULE, `⚠️ AI Sentiment failed for ${signal.ticker}: ${err.message}`);
-      }
-    }
-  } else if (!config.ai.geminiApiKey) {
-    logger.info(MODULE, "⏭️ Skipping AI Sentiment (GEMINI_API_KEY not set).");
-  }
-
   logger.info(MODULE, `✨ Generated ${buySignals.length} buy signal(s).`);
-
   return buySignals;
 }
 
 /**
- * Check sell/exit conditions for a list of tickers
- * (for monitoring existing positions).
+ * Check sell/exit conditions for a list of tickers.
+ * Uses TradingView 4H data to check technical exit signals.
  */
-export async function checkExitSignals(watchTickers: string[]): Promise<{ ticker: string; sell: SellSignal }[]> {
+export async function checkExitSignals(watchTickers: string[]): Promise<{ ticker: string; sell: SellSignal; currentPrice: number }[]> {
   if (watchTickers.length === 0) return [];
 
   logger.info(MODULE, `Checking exit signals for ${watchTickers.length} watched positions...`);
-  const exitSignals: { ticker: string; sell: SellSignal }[] = [];
+  const exitSignals: { ticker: string; sell: SellSignal; currentPrice: number }[] = [];
 
-  const dataList = await fetchAllTickers(watchTickers, "1h", "1mo");
+  // Fetch 4H data from TradingView
+  const fourHourMap = await fetchTradingViewBatch(watchTickers, "4H");
 
-  for (const { ticker, candles } of dataList) {
-    const fourHourCandles = candles.filter((_, i) => i % 4 === 3 || i === candles.length - 1);
-    const analysis = analyze4H(fourHourCandles);
+  for (const ticker of watchTickers) {
+    const indicators = fourHourMap.get(ticker);
+    if (!indicators) continue;
+
+    const analysis = analyze4H(indicators);
     if (!analysis) continue;
 
     const sell = checkSellCondition(analysis);
     if (sell.shouldSell) {
-      exitSignals.push({ ticker, sell: { shouldSell: true, reason: sell.reason } });
+      exitSignals.push({
+        ticker,
+        sell: { shouldSell: true, reason: sell.reason },
+        currentPrice: analysis.close,
+      });
       logger.warn(MODULE, `🔴 ${ticker} — EXIT SIGNAL: ${sell.reason}`);
     }
   }

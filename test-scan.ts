@@ -3,7 +3,6 @@
  *
  * Jalankan full scan lokal dan tampilkan hasil detail
  * Run: npm run build && npx ts-node test-scan.ts
- * atau: npm run build && node dist/test-scan.js
  */
 
 import dotenv from "dotenv";
@@ -19,31 +18,28 @@ const MODULE = "TestScan";
 async function runTestScan(): Promise<void> {
   console.log("\n");
   console.log("╔════════════════════════════════════════════════╗");
-  console.log("║   TEST SCAN - LOCAL DEVELOPMENT               ║");
+  console.log("║   TEST SCAN - TradingView + Yahoo Finance     ║");
   console.log("╚════════════════════════════════════════════════╝");
   console.log("\n");
 
   const startTime = Date.now();
 
   try {
-    // Show config
     const tickers = getTickerList();
-    logger.info(MODULE, `📊 Ticker list loaded: ${tickers.length} tickers`);
-    logger.info(MODULE, `🎯 Scan universe: ${process.env.SCAN_UNIVERSE || "static"}`);
-    logger.info(MODULE, `📈 Top tickers limit: ${process.env.TOP_TICKERS_LIMIT || "300"}`);
-    logger.info(MODULE, `✅ Pre-screen enabled: ${process.env.ENABLE_VOLUME_PRESCREEN !== "false"}`);
+    logger.info(MODULE, `📊 Ticker list: ${tickers.length} tickers`);
+    logger.info(MODULE, `🏦 Exchange: IDX`);
+    logger.info(MODULE, `📊 Data: TradingView (1D + 4H)`);
+    logger.info(MODULE, `📰 News: Yahoo Finance`);
     logger.info(MODULE, "");
     logger.info(MODULE, "🚀 Starting full scan...");
     logger.info(MODULE, "");
 
-    // Run scan
     const signals = await generateSignals();
     const summary = getFetchSummary();
 
     const durationSec = ((Date.now() - startTime) / 1000).toFixed(1);
     const durationMin = (Number(durationSec) / 60).toFixed(1);
 
-    // Print results
     console.log("\n╔═ SCAN RESULTS ═════════════════════════════════╗\n");
 
     console.log(`⏱️  Duration: ${durationMin} minutes (${durationSec}s)\n`);
@@ -53,17 +49,9 @@ async function runTestScan(): Promise<void> {
     console.log(`   ❌ Failed:  ${summary.failed} ticker`);
     if (summary.rateLimited.length > 0) {
       console.log(`   ⏳ Rate Limited: ${summary.rateLimited.length}`);
-      const sample = summary.rateLimited
-        .slice(0, 10)
-        .map((t) => t.replace(".JK", ""))
-        .join(", ");
-      console.log(`      ${sample}${summary.rateLimited.length > 10 ? "..." : ""}`);
     }
     if (summary.notFound.length > 0) {
       console.log(`   ❓ Not Found: ${summary.notFound.length}`);
-    }
-    if (summary.otherErrors.length > 0) {
-      console.log(`   💥 Other Errors: ${summary.otherErrors.length}`);
     }
     console.log("");
 
@@ -77,8 +65,9 @@ async function runTestScan(): Promise<void> {
         console.log(`      Entry: Rp ${sig.entry.toLocaleString("id-ID")}`);
         console.log(`      SL: Rp ${sig.stopLoss.toLocaleString("id-ID")} | TP: Rp ${sig.takeProfit.toLocaleString("id-ID")}`);
         console.log(`      Position: ${sig.shares} shares (Rp ${sig.positionSize.toLocaleString("id-ID")})`);
-        if (sig.aiSentiment) {
-          console.log(`      AI Sentiment: ${sig.aiSentiment.score > 0 ? "+" : ""}${sig.aiSentiment.score}/10`);
+        console.log(`      RSI: ${sig.fourHourAnalysis.rsi.toFixed(1)} | ADX: ${sig.fourHourAnalysis.adx.toFixed(1)} | TV Rec: ${sig.fourHourAnalysis.recommendAll.toFixed(2)}`);
+        if (sig.newsSentiment && sig.newsSentiment.newsCount > 0) {
+          console.log(`      News Sentiment: ${sig.newsSentiment.score > 0 ? "+" : ""}${sig.newsSentiment.score}/10 — ${sig.newsSentiment.summary}`);
         }
         console.log("");
       });

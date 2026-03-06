@@ -63,9 +63,14 @@ export function formatBuyMessage(signal: BuySignal): string {
 
   const rsiVal = signal.fourHourAnalysis.rsi.toFixed(1);
   const adxVal = signal.fourHourAnalysis.adx.toFixed(1);
-  const boVal = signal.fourHourAnalysis.breakoutStrength.toFixed(2);
+  const tvRec = signal.fourHourAnalysis.recommendAll.toFixed(2);
   const slPct = (((signal.entry - signal.stopLoss) / signal.entry) * 100).toFixed(2);
   const tpPct = (((signal.takeProfit - signal.entry) / signal.entry) * 100).toFixed(2);
+
+  let sentimentText = "";
+  if (signal.newsSentiment && signal.newsSentiment.newsCount > 0) {
+    sentimentText = `\n\n📰 *Sentimen Berita:* ${signal.newsSentiment.score > 0 ? "+" : ""}${signal.newsSentiment.score}/10\n└ ${signal.newsSentiment.summary}`;
+  }
 
   return `📈 *SWING BUY SIGNAL*
 
@@ -74,11 +79,11 @@ export function formatBuyMessage(signal: BuySignal): string {
 💰 *Entry:* ${formatRupiah(signal.entry)}
 🛑 *Stop Loss:* ${formatRupiah(signal.stopLoss)} (-${slPct}%)
 🎯 *Take Profit:* ${formatRupiah(signal.takeProfit)} (+${tpPct}%)
-📊 *Timeframe:* 4H
+📊 *Timeframe:* 4H + 1D
 📈 *Trend 1D:* ✅ Bullish
 
 🔬 *Konfirmasi Teknikal:*
-├ Breakout: +${boVal}% ✅
+├ TV Recommendation: ${tvRec}
 ├ RSI 4H: ${rsiVal} ✅
 ├ MACD: Bullish ✅
 └ ADX: ${adxVal} (Trend Strength) ✅
@@ -90,12 +95,12 @@ export function formatBuyMessage(signal: BuySignal): string {
 └ Position: ${formatRupiah(signal.positionSize)}
 
 📋 *Score Breakdown:*
-├ Breakout: ${signal.breakdown.breakoutScore}/100 (35%)
+├ TV Recommend: ${signal.breakdown.recommendScore}/100 (35%)
 ├ Trend: ${signal.breakdown.trendScore}/100 (20%)
 ├ Volume: ${signal.breakdown.volumeScore}/100 (15%)
-├ ADX: ${signal.breakdown.adxScore}/100 (10%)
+├ ADX: ${signal.breakdown.adxScore}/100 (15%)
 ├ RSI: ${signal.breakdown.rsiScore}/100 (10%)
-└ Volatility: ${signal.breakdown.volatilityScore}/100 (10%)
+└ Sentiment: ${signal.breakdown.sentimentScore}/100 (5%)${sentimentText}
 
 ⏰ *Time:* ${timestamp} WIB
 

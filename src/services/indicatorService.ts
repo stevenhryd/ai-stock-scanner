@@ -1,38 +1,15 @@
 /**
  * Indicator Service
  *
- * Calculates technical indicators (SMA, EMA, RSI) and performs
- * timeframe-specific analysis for 1D (trend filter) and 4H (entry trigger).
+ * Analyzes TradingView indicator data for 1D (trend filter) and 4H (entry trigger).
+ * TradingView already computes RSI, MACD, SMA, EMA, ADX, ATR — this service
+ * applies the trading logic on top of those pre-computed values.
  */
 
-import { SMA, EMA, RSI, MACD, ADX as ADXIndicator, ATR } from "technicalindicators";
-import { CandleData } from "./dataService.js";
+import { TradingViewIndicators } from "./dataService.js";
 import logger from "../utils/logger.js";
 
 const MODULE = "IndicatorService";
-
-// ─── Indicator Calculation ─────────────────────────────────────────────────
-
-/**
- * Calculate Simple Moving Average.
- */
-export function calculateSMA(closes: number[], period: number): number[] {
-  return SMA.calculate({ period, values: closes });
-}
-
-/**
- * Calculate Exponential Moving Average.
- */
-export function calculateEMA(closes: number[], period: number): number[] {
-  return EMA.calculate({ period, values: closes });
-}
-
-/**
- * Calculate Relative Strength Index.
- */
-export function calculateRSI(closes: number[], period: number = 14): number[] {
-  return RSI.calculate({ period, values: closes });
-}
 
 // ─── Daily (1D) Analysis ────────────────────────────────────────────────────
 
@@ -41,194 +18,136 @@ export interface DailyAnalysis {
   close: number;
   sma20: number;
   sma50: number;
+  ema20: number;
+  ema50: number;
   rsi: number;
+  /** TradingView recommendation summary: -1 (SELL) to 1 (BUY) */
+  recommendAll: number;
 }
 
 /**
- * Analyze daily (1D) candles for trend filter.
+ * Analyze daily (1D) TradingView indicators for trend filter.
  *
- * Bullish conditions:
- *   1. Close > SMA20
- *   2. SMA20 > SMA50
- *   3. RSI > 50
+ * Bullish conditions (at least 2 of 3 must be true):
+ *   1. Close > SMA20 (price above short-term average)
+ *   2. EMA20 > EMA50 (moving average uptrend)
+ *   3. RSI > 45 (not oversold)
+ * Plus: TradingView overall recommendation must be neutral or better (>= 0)
  */
-export function analyzeDaily(candles: CandleData[]): DailyAnalysis | null {
-  if (candles.length < 50) {
-    logger.warn(MODULE, "Not enough daily candles for analysis (need 50+)");
+export function analyzeDaily(indicators: TradingViewIndicators): DailyAnalysis | null {
+  if (indicators.close <= 0 || indicators.sma20 <= 0) {
+    logger.debug(MODULE, "Insufficient daily indicator data");
     return null;
   }
 
-  const closes = candles.map((c) => c.close);
+  const cond1 = indicators.close > indicators.sma20;
+  const cond2 = indicators.ema20 > 0 && indicators.ema50 > 0 && indicators.ema20 > indicators.ema50;
+  const cond3 = indicators.rsi > 45;
+  const condCount = (cond1 ? 1 : 0) + (cond2 ? 1 : 0) + (cond3 ? 1 : 0);
 
-  const sma20Values = calculateSMA(closes, 20);
-  const sma50Values = calculateSMA(closes, 50);
-  const rsiValues = calculateRSI(closes, 14);
-
-  if (sma20Values.length === 0 || sma50Values.length === 0 || rsiValues.length === 0) {
-    logger.warn(MODULE, "Insufficient data to calculate indicators");
-    return null;
-  }
-
-  const latestClose = closes[closes.length - 1];
-  const latestSMA20 = sma20Values[sma20Values.length - 1];
-  const latestSMA50 = sma50Values[sma50Values.length - 1];
-  const latestRSI = rsiValues[rsiValues.length - 1];
-
-  const isBullish = latestClose > latestSMA20 && latestSMA20 > latestSMA50 && latestRSI > 50;
+  // At least 2 of 3 conditions, and TradingView overall rec not sell
+  const isBullish = condCount >= 2 && indicators.recommendAll >= 0;
 
   return {
     isBullish,
-    close: latestClose,
-    sma20: latestSMA20,
-    sma50: latestSMA50,
-    rsi: latestRSI,
+    close: indicators.close,
+    sma20: indicators.sma20,
+    sma50: indicators.sma50,
+    ema20: indicators.ema20,
+    ema50: indicators.ema50,
+    rsi: indicators.rsi,
+    recommendAll: indicators.recommendAll,
   };
 }
 
 // ─── 4H Analysis ────────────────────────────────────────────────────────────
 
 export interface FourHourAnalysis {
+  /** Whether current close breaks above recent resistance */
   breakoutDetected: boolean;
+  /** Whether volume exceeds 1.5x average */
   volumeSpike: boolean;
+  /** Whether RSI is in the sweet spot (55–70) */
   rsiInRange: boolean;
   close: number;
-  high5: number;
+  open: number;
+  high: number;
+  low: number;
   avgVolume20: number;
   currentVolume: number;
   rsi: number;
   sma20: number;
-  /** Breakout percentage above 5-candle high */
-  breakoutStrength: number;
-  /** Volume as multiple of 20-candle average */
+  ema20: number;
+  /** Volume as multiple of 20-period average */
   volumeMultiple: number;
-  /** Standard deviation of closes for volatility calculation */
-  volatility: number;
-  /** Whether breakout candle is bullish (close > open) */
+  /** Whether candle is bullish (close > open) */
   isBullishCandle: boolean;
   /** Whether MACD line is above signal line */
   macdBullish: boolean;
-  /** ADX value — trend strength (>=25 is strong trend) */
+  /** MACD histogram value */
+  macdHist: number;
+  /** ADX value (>=25 is strong trend) */
   adx: number;
-  /** Average True Range (14-period) for dynamic SL sizing */
+  /** ATR(14) for dynamic SL sizing */
   atr: number;
+  /** TradingView recommendation: -1 (SELL) to 1 (BUY) */
+  recommendAll: number;
+  recommendMA: number;
+  recommendOsc: number;
 }
 
 /**
- * Analyze 4H candles for entry trigger.
+ * Analyze 4H TradingView indicators for entry trigger.
  *
- * BUY trigger conditions:
- *   1. Break high of last 5 candles
- *   2. Volume > 1.5x average volume (20 candles)
- *   3. RSI between 55–70
+ * BUY trigger conditions (relaxed for higher signal count):
+ *   1. Close > SMA20 OR Close > EMA20 (above short-term average)
+ *   2. Volume > 1.2x average volume (relaxed from 1.5x)
+ *   3. RSI between 45–80 (wider range)
  */
-export function analyze4H(candles: CandleData[]): FourHourAnalysis | null {
-  if (candles.length < 25) {
-    logger.warn(MODULE, "Not enough 4H candles for analysis (need 25+)");
+export function analyze4H(indicators: TradingViewIndicators): FourHourAnalysis | null {
+  if (indicators.close <= 0) {
+    logger.debug(MODULE, "No valid 4H data");
     return null;
   }
 
-  const closes = candles.map((c) => c.close);
-  const highs = candles.map((c) => c.high);
-  const lows = candles.map((c) => c.low);
-  const volumes = candles.map((c) => c.volume);
+  // Breakout: close above SMA20 OR EMA20
+  const breakoutDetected = (indicators.sma20 > 0 && indicators.close > indicators.sma20) || (indicators.ema20 > 0 && indicators.close > indicators.ema20);
 
-  const latestCandle = candles[candles.length - 1];
+  // Volume spike: current volume > 1.2x average (relaxed)
+  const volumeMultiple = indicators.avgVolume20 > 0 ? indicators.volume / indicators.avgVolume20 : 0;
+  const volumeSpike = volumeMultiple > 1.2;
 
-  // 1. High of last 5 candles (excluding current)
-  const last5Highs = highs.slice(-6, -1);
-  const high5 = Math.max(...last5Highs);
-  const breakoutDetected = latestCandle.close > high5;
-  const breakoutStrength = high5 > 0 ? ((latestCandle.close - high5) / high5) * 100 : 0;
+  // RSI range (wider)
+  const rsiInRange = indicators.rsi >= 45 && indicators.rsi <= 80;
 
-  // 2. Volume spike: current volume > 1.5x average of last 20 candles
-  const last20Volumes = volumes.slice(-21, -1);
-  const avgVolume20 = last20Volumes.reduce((sum, v) => sum + v, 0) / last20Volumes.length;
-  const volumeSpike = latestCandle.volume > avgVolume20 * 1.5;
-  const volumeMultiple = avgVolume20 > 0 ? latestCandle.volume / avgVolume20 : 0;
+  // MACD bullish: MACD line > signal line
+  const macdBullish = indicators.macdLine > indicators.macdSignal;
 
-  // 3. RSI between 55–70
-  const rsiValues = calculateRSI(closes, 14);
-  const latestRSI = rsiValues[rsiValues.length - 1] || 0;
-  const rsiInRange = latestRSI >= 55 && latestRSI <= 70;
-
-  // 4. SMA20 for exit signal
-  const sma20Values = calculateSMA(closes, 20);
-  const latestSMA20 = sma20Values[sma20Values.length - 1] || 0;
-
-  // 5. Volatility (standard deviation of closes over last 20 candles)
-  const last20Closes = closes.slice(-20);
-  const mean = last20Closes.reduce((s, c) => s + c, 0) / last20Closes.length;
-  const variance = last20Closes.reduce((s, c) => s + Math.pow(c - mean, 2), 0) / last20Closes.length;
-  const volatility = Math.sqrt(variance);
-
-  // 6. Bullish candle confirmation (close > open on breakout candle)
-  const isBullishCandle = latestCandle.close > latestCandle.open;
-
-  // 7. MACD (12, 26, 9) — bullish when MACD line > Signal line
-  let macdBullish = false;
-  try {
-    const macdResult = MACD.calculate({
-      values: closes,
-      fastPeriod: 12,
-      slowPeriod: 26,
-      signalPeriod: 9,
-      SimpleMAOscillator: false,
-      SimpleMASignal: false,
-    });
-    const latestMACD = macdResult[macdResult.length - 1];
-    if (latestMACD && latestMACD.MACD !== undefined && latestMACD.signal !== undefined) {
-      macdBullish = latestMACD.MACD > latestMACD.signal;
-    }
-  } catch {
-    // Not enough data for MACD — treat as non-bullish
-  }
-
-  // 8. ADX (14) — trend strength. >= 25 = strong trend
-  let adx = 0;
-  try {
-    const adxResult = ADXIndicator.calculate({
-      close: closes,
-      high: highs,
-      low: lows,
-      period: 14,
-    });
-    const latestADX = adxResult[adxResult.length - 1];
-    if (latestADX) adx = latestADX.adx;
-  } catch {
-    // Not enough data
-  }
-
-  // 9. ATR (14) — average true range for dynamic stop loss
-  let atr = 0;
-  try {
-    const atrResult = ATR.calculate({
-      close: closes,
-      high: highs,
-      low: lows,
-      period: 14,
-    });
-    atr = atrResult[atrResult.length - 1] || 0;
-  } catch {
-    // Not enough data
-  }
+  // Bullish candle
+  const isBullishCandle = indicators.close > indicators.open;
 
   return {
     breakoutDetected,
     volumeSpike,
     rsiInRange,
-    close: latestCandle.close,
-    high5,
-    avgVolume20,
-    currentVolume: latestCandle.volume,
-    rsi: latestRSI,
-    sma20: latestSMA20,
-    breakoutStrength: Math.max(0, breakoutStrength),
+    close: indicators.close,
+    open: indicators.open,
+    high: indicators.high,
+    low: indicators.low,
+    avgVolume20: indicators.avgVolume20,
+    currentVolume: indicators.volume,
+    rsi: indicators.rsi,
+    sma20: indicators.sma20,
+    ema20: indicators.ema20,
     volumeMultiple,
-    volatility,
     isBullishCandle,
     macdBullish,
-    adx,
-    atr,
+    macdHist: indicators.macdHist,
+    adx: indicators.adx,
+    atr: indicators.atr,
+    recommendAll: indicators.recommendAll,
+    recommendMA: indicators.recommendMA,
+    recommendOsc: indicators.recommendOsc,
   };
 }
 
@@ -247,7 +166,7 @@ export interface SellSignal {
  *   2. RSI < 45
  */
 export function checkSellCondition(analysis: FourHourAnalysis): SellSignal {
-  if (analysis.close < analysis.sma20) {
+  if (analysis.sma20 > 0 && analysis.close < analysis.sma20) {
     return { shouldSell: true, reason: "Close below SMA20 (4H)" };
   }
   if (analysis.rsi < 45) {
@@ -257,9 +176,6 @@ export function checkSellCondition(analysis: FourHourAnalysis): SellSignal {
 }
 
 export default {
-  calculateSMA,
-  calculateEMA,
-  calculateRSI,
   analyzeDaily,
   analyze4H,
   checkSellCondition,

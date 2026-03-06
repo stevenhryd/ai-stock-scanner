@@ -20,9 +20,6 @@ export interface AppConfig {
     size: number;
     concurrencyLimit: number;
   };
-  ai: {
-    geminiApiKey: string;
-  };
   cron: {
     dailyScan: string;
     hourlyScan: string;
@@ -59,9 +56,6 @@ const config: AppConfig = {
   batch: {
     size: parseInt(getEnvOrDefault("BATCH_SIZE", "20"), 10),
     concurrencyLimit: parseInt(getEnvOrDefault("CONCURRENCY_LIMIT", "1"), 10),
-  },
-  ai: {
-    geminiApiKey: getEnvOrDefault("GEMINI_API_KEY", ""),
   },
   cron: {
     // 08:45 WIB = 01:45 UTC (WIB is UTC+7)
